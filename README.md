@@ -23,7 +23,9 @@ No AI, no summarization. Shared whiteboard that any Claude surface can read and 
 
 - **Worker:** Cloudflare Worker at `relay-mcp.tracklix.co` (account `zhowe@uwalumni.com`). Co-located on the Tracklix Cloudflare zone because `pamplemoose.co` is on Vercel DNS.
 - **Database:** Postgres tables in the existing SiftId Supabase project (`yrhppxgzojagwwwsmhcf`). All tables prefixed `relay_`. RLS on, no policies, service-key-only.
-- **Auth:** single shared API key in `RELAY_API_KEY` Worker secret. Sent by clients as `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+- **Auth:** two paths on the same server.
+  - **Static Bearer** for Code and Cowork: `Authorization: Bearer <RELAY_API_KEY>`. Simple, no browser flow.
+  - **OAuth 2.1** for Claude.ai's custom connector: the Worker exposes `/.well-known/oauth-authorization-server`, `/register`, `/authorize`, and `/token`. Access tokens are HS256 JWTs signed with `RELAY_API_KEY`. Stateless, no KV or DO. Access tokens last 90 days, refresh tokens 365.
 - **Tenant:** hardcoded to a single user UUID stored in `RELAY_USER_ID`. Multi-user swap is a one-file change in `src/auth.ts` plus a policy migration.
 
 ## Where the API key lives
@@ -75,14 +77,17 @@ Cowork tasks should include a `session_tag` on every post so you can tell cross-
 
 ### Claude.ai (Chat) custom connector
 
+The relay speaks OAuth 2.1 with Dynamic Client Registration, so Claude.ai discovers and handles auth automatically.
+
 1. In Claude.ai, open Settings → Connectors → **Add custom connector**.
 2. Name: `Relay`.
-3. URL: `https://relay-mcp.tracklix.co/mcp`.
-4. Authentication: choose **API key** (or the equivalent bearer token option).
-5. Key value: paste the `RELAY_API_KEY` from 1Password.
-6. Save. Start a new chat and confirm the `relay_*` tools are available.
+3. Remote MCP server URL: `https://relay-mcp.tracklix.co/mcp`.
+4. Leave the **Advanced settings** OAuth fields blank. Claude.ai does Dynamic Client Registration on its own.
+5. Click Add. Claude.ai opens a browser tab to `relay-mcp.tracklix.co/authorize`.
+6. Paste your `RELAY_API_KEY` from 1Password into the single input, click Authorize.
+7. Browser redirects back to Claude.ai. Connector shows six tools.
 
-Claude.ai connectors run via the hosted MCP gateway, which speaks standard Streamable HTTP. No extra config needed.
+Access tokens last 90 days with automatic refresh via the 365-day refresh token, so you should rarely need to re-authorize. If the connector ever fails auth, remove it and re-add.
 
 ## Usage Guide
 
@@ -222,8 +227,9 @@ Decide after thirty days of real use.
 ```
 products/relay-mcp/
   src/
-    index.ts         Worker entry, MCP JSON-RPC protocol
-    auth.ts          API key middleware
+    index.ts         Worker entry, MCP JSON-RPC protocol, routes
+    oauth.ts         OAuth 2.1 facade (metadata, register, authorize, token)
+    jwt.ts           HS256 JWT sign, verify, and PKCE check
     db.ts            Supabase client factory
     types.ts
     tools/
@@ -232,7 +238,7 @@ products/relay-mcp/
   migrations/
     001_initial.sql  three tables + indexes + RLS lockdown
   scripts/
-    smoke.ts         end-to-end smoke test (18 assertions)
+    smoke.ts         end-to-end smoke test (40 assertions, includes OAuth)
   wrangler.toml
   package.json
   tsconfig.json
