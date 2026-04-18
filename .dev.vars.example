@@ -1,0 +1,4 @@
+RELAY_API_KEY=replace-with-a-random-32-plus-char-string
+SUPABASE_URL=https://replace-with-project-ref.supabase.co
+SUPABASE_SERVICE_KEY=replace-with-service-role-key
+RELAY_USER_ID=replace-with-uuid-for-single-user-v1

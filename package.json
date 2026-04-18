@@ -1,0 +1,24 @@
+{
+  "name": "relay-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Session Relay MCP server. Shared threads across Claude Chat, Cowork, and Code.",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "smoke:local": "node --experimental-strip-types scripts/smoke.ts",
+    "smoke:remote": "RELAY_URL=https://relay-mcp.pamplemoose.co node --experimental-strip-types scripts/smoke.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@supabase/supabase-js": "^2.58.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "typescript": "^5.7.3",
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,20 @@
+name = "relay-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Custom domain route. Matches relay-mcp.pamplemoose.co.
+# Requires pamplemoose.co zone on this Cloudflare account and DNS CNAME pointing
+# relay-mcp -> relay-mcp.<account>.workers.dev. Wrangler creates the route on deploy.
+routes = [
+  { pattern = "relay-mcp.pamplemoose.co", custom_domain = true }
+]
+
+[observability]
+enabled = true
+
+# Secrets are set via `wrangler secret put <NAME>`. Do not commit values.
+# Required secrets:
+#   RELAY_API_KEY        Single shared key for v1 auth
+#   SUPABASE_URL         e.g. https://<project>.supabase.co
+#   SUPABASE_SERVICE_KEY Supabase service role key (never expose to clients)
