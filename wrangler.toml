@@ -3,11 +3,11 @@ main = "src/index.ts"
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Custom domain route. Matches relay-mcp.pamplemoose.co.
-# Requires pamplemoose.co zone on this Cloudflare account and DNS CNAME pointing
-# relay-mcp -> relay-mcp.<account>.workers.dev. Wrangler creates the route on deploy.
+# Custom domain route. Co-located on tracklix.co since that zone is already on
+# Cloudflare (pamplemoose.co is on Vercel DNS, so it cannot bind a Workers
+# custom domain without a zone move). Wrangler auto-creates the CNAME on deploy.
 routes = [
-  { pattern = "relay-mcp.pamplemoose.co", custom_domain = true }
+  { pattern = "relay-mcp.tracklix.co", custom_domain = true }
 ]
 
 [observability]
