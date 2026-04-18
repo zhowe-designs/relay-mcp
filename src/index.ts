@@ -1,7 +1,16 @@
 import { z } from "zod";
 import type { Env } from "./types.js";
-import { validateApiKey } from "./auth.js";
 import { makeClient } from "./db.js";
+import {
+  authorizationServerMetadata,
+  protectedResourceMetadata,
+  handleRegister,
+  handleAuthorizeGet,
+  handleAuthorizePost,
+  handleToken,
+  validateBearer,
+  corsPreflight
+} from "./oauth.js";
 import {
   listThreads,
   listThreadsSchema,
@@ -92,9 +101,25 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
+    if (request.method === "OPTIONS") return corsPreflight();
+
     if (url.pathname === "/health") {
       return json({ ok: true, service: SERVER_INFO.name, version: SERVER_INFO.version });
     }
+
+    if (url.pathname === "/.well-known/oauth-authorization-server") {
+      return authorizationServerMetadata(request);
+    }
+    if (url.pathname === "/.well-known/oauth-protected-resource") {
+      return protectedResourceMetadata(request);
+    }
+    if (url.pathname === "/register") return handleRegister(request);
+    if (url.pathname === "/authorize") {
+      if (request.method === "GET") return handleAuthorizeGet(request);
+      if (request.method === "POST") return handleAuthorizePost(request, env);
+      return new Response("method not allowed", { status: 405 });
+    }
+    if (url.pathname === "/token") return handleToken(request, env);
 
     // MCP endpoint. POST accepts JSON-RPC. GET returns a short hello.
     if (url.pathname === "/mcp" || url.pathname === "/") {
@@ -102,17 +127,22 @@ export default {
         return json({
           service: SERVER_INFO.name,
           protocol: PROTOCOL_VERSION,
-          usage: "POST JSON-RPC 2.0 requests to this endpoint with Authorization: Bearer <RELAY_API_KEY>."
+          usage: "POST JSON-RPC 2.0 requests to this endpoint with Authorization: Bearer <token>."
         });
       }
       if (request.method !== "POST") {
         return new Response("method not allowed", { status: 405 });
       }
 
-      if (!validateApiKey(request, env)) {
+      const authResult = await validateBearer(request, env);
+      if (!authResult.ok) {
+        const origin = `${url.protocol}//${url.host}`;
         return new Response(JSON.stringify({ error: "unauthorized" }), {
           status: 401,
-          headers: { "content-type": "application/json", "www-authenticate": "Bearer" }
+          headers: {
+            "content-type": "application/json",
+            "www-authenticate": `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource"`
+          }
         });
       }
 
@@ -126,10 +156,9 @@ export default {
       const requests = Array.isArray(body) ? body : [body];
       const responses: JsonRpcResponse[] = [];
       for (const req of requests) {
-        const res = await handleRpc(req, env);
+        const res = await handleRpc(req, env, authResult.userId);
         if (res) responses.push(res);
       }
-      // Notifications produce no response. If all inputs were notifications, return 204.
       if (responses.length === 0) return new Response(null, { status: 204 });
       const payload = Array.isArray(body) ? responses : responses[0];
       return json(payload);
@@ -139,7 +168,11 @@ export default {
   }
 } satisfies ExportedHandler<Env>;
 
-async function handleRpc(req: JsonRpcRequest, env: Env): Promise<JsonRpcResponse | null> {
+async function handleRpc(
+  req: JsonRpcRequest,
+  env: Env,
+  userId: string
+): Promise<JsonRpcResponse | null> {
   const id = req.id ?? null;
   const isNotification = req.id === undefined;
 
@@ -169,7 +202,7 @@ async function handleRpc(req: JsonRpcRequest, env: Env): Promise<JsonRpcResponse
         });
 
       case "tools/call":
-        return await handleToolCall(id, req.params ?? {}, env);
+        return await handleToolCall(id, req.params ?? {}, env, userId);
 
       default:
         if (isNotification) return null;
@@ -185,7 +218,8 @@ async function handleRpc(req: JsonRpcRequest, env: Env): Promise<JsonRpcResponse
 async function handleToolCall(
   id: number | string | null,
   params: Record<string, unknown>,
-  env: Env
+  env: Env,
+  userId: string
 ): Promise<JsonRpcResponse> {
   const name = params.name as string | undefined;
   const args = (params.arguments ?? {}) as Record<string, unknown>;
@@ -199,12 +233,11 @@ async function handleToolCall(
 
   const db = makeClient(env);
   try {
-    // Handler signatures vary in arg shape but not runtime semantics.
     const result = await (tool.handler as (
       c: ReturnType<typeof makeClient>,
       u: string,
       p: unknown
-    ) => Promise<unknown>)(db, env.RELAY_USER_ID, parsed.data);
+    ) => Promise<unknown>)(db, userId, parsed.data);
 
     return rpcResult(id, {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }]

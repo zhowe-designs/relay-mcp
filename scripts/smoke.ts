@@ -195,6 +195,153 @@ async function main() {
     assert("archived thread hidden from default list", !found);
   }
 
+  // 12. OAuth discovery endpoints
+  {
+    const asRes = await fetch(RELAY_URL + "/.well-known/oauth-authorization-server");
+    const asMeta = (await asRes.json()) as { issuer?: string; authorization_endpoint?: string; token_endpoint?: string };
+    assert("authorization-server metadata 200", asRes.status === 200);
+    assert("metadata has issuer", !!asMeta.issuer);
+    assert("metadata has authorize endpoint", !!asMeta.authorization_endpoint);
+    assert("metadata has token endpoint", !!asMeta.token_endpoint);
+
+    const prRes = await fetch(RELAY_URL + "/.well-known/oauth-protected-resource");
+    const prMeta = (await prRes.json()) as { resource?: string; authorization_servers?: string[] };
+    assert("protected-resource metadata 200", prRes.status === 200);
+    assert("metadata names authorization server", (prMeta.authorization_servers ?? []).length > 0);
+  }
+
+  // 13. Unauthorized /mcp returns WWW-Authenticate with resource_metadata
+  {
+    const res = await fetch(RELAY_URL + "/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })
+    });
+    assert("unauth /mcp is 401", res.status === 401);
+    const www = res.headers.get("www-authenticate") ?? "";
+    assert("WWW-Authenticate names resource_metadata", www.includes("resource_metadata"));
+  }
+
+  // 14. DCR: /register returns a client_id
+  let clientId = "";
+  {
+    const res = await fetch(RELAY_URL + "/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: ["https://claude.ai/api/mcp/callback"], client_name: "smoke-test" })
+    });
+    const data = (await res.json()) as { client_id?: string };
+    assert("register returns 200", res.status === 200);
+    assert("register issues client_id", !!data.client_id);
+    clientId = data.client_id ?? "";
+  }
+
+  // 15. Full OAuth happy path: authorize -> token -> /mcp with access token
+  {
+    const codeVerifier = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    const challengeBytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier)));
+    const codeChallenge = btoa(String.fromCharCode(...challengeBytes))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    const redirectUri = "https://claude.ai/api/mcp/callback";
+
+    const authorizeRes = await fetch(
+      `${RELAY_URL}/authorize?` +
+        new URLSearchParams({
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          response_type: "code",
+          code_challenge: codeChallenge,
+          code_challenge_method: "S256",
+          state: "smoke-state",
+          scope: "mcp"
+        }).toString()
+    );
+    assert("authorize GET returns 200 HTML", authorizeRes.status === 200);
+    const html = await authorizeRes.text();
+    assert("authorize page contains form", html.includes("<form") && html.includes("api_key"));
+
+    const postForm = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      state: "smoke-state",
+      scope: "mcp",
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
+      api_key: RELAY_API_KEY
+    });
+    const submitRes = await fetch(RELAY_URL + "/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: postForm.toString(),
+      redirect: "manual"
+    });
+    assert("authorize POST redirects", submitRes.status === 302);
+    const location = submitRes.headers.get("location") ?? "";
+    const locUrl = new URL(location);
+    const code = locUrl.searchParams.get("code") ?? "";
+    const returnedState = locUrl.searchParams.get("state") ?? "";
+    assert("redirect carries auth code", !!code);
+    assert("redirect echoes state", returnedState === "smoke-state");
+
+    const tokenRes = await fetch(RELAY_URL + "/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        code_verifier: codeVerifier,
+        redirect_uri: redirectUri,
+        client_id: clientId
+      }).toString()
+    });
+    const tokens = (await tokenRes.json()) as { access_token?: string; refresh_token?: string; token_type?: string };
+    assert("token exchange returns 200", tokenRes.status === 200);
+    assert("access_token issued", !!tokens.access_token);
+    assert("refresh_token issued", !!tokens.refresh_token);
+    assert("token_type is Bearer", tokens.token_type === "Bearer");
+
+    const mcpRes = await fetch(RELAY_URL + "/mcp", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${tokens.access_token}`
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 999, method: "tools/list" })
+    });
+    const mcpBody = (await mcpRes.json()) as { result?: { tools?: unknown[] } };
+    assert("OAuth access token works on /mcp", (mcpBody.result?.tools ?? []).length === 6);
+
+    const refreshRes = await fetch(RELAY_URL + "/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: tokens.refresh_token ?? "",
+        client_id: clientId
+      }).toString()
+    });
+    const refreshed = (await refreshRes.json()) as { access_token?: string };
+    assert("refresh_token grant returns 200", refreshRes.status === 200);
+    assert("refresh issues new access_token", !!refreshed.access_token);
+
+    const badPkceRes = await fetch(RELAY_URL + "/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        code_verifier: "wrong-verifier-value-that-does-not-match",
+        redirect_uri: redirectUri,
+        client_id: clientId
+      }).toString()
+    });
+    assert("wrong PKCE verifier is rejected", badPkceRes.status === 400);
+  }
+
   console.log("");
   if (failures > 0) {
     console.log(`FAILED ${failures} assertion${failures === 1 ? "" : "s"}`);
