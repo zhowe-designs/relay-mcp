@@ -84,25 +84,94 @@ Cowork tasks should include a `session_tag` on every post so you can tell cross-
 
 Claude.ai connectors run via the hosted MCP gateway, which speaks standard Streamable HTTP. No extra config needed.
 
-## Hello world
+## Usage Guide
 
-Post from one session, read from another. Thirty seconds.
+The relay is the shared whiteboard between your Claude surfaces. It is not the log. How to use it day to day.
 
-1. In Claude Code (or any MCP-connected session):
-   ```
-   Use relay_post_message to post to thread "hello-relay":
-     content: "live from Code"
-     surface: "code"
-   ```
-2. In Claude.ai Chat:
-   ```
-   Use relay_read_thread on "hello-relay"
-   ```
-3. Chat prints the message you posted from Code. The relay did its job.
+### How to post and read from each surface
 
-## Surfaces convention
+These are the kinds of sentences you will actually say. You do not need to know tool names or argument shapes. Describe intent, the model picks the right relay tool.
 
-When posting, always set `surface` to one of `chat | cowork | code | other` so downstream readers can filter. Optional `session_tag` is free text (e.g. `"tracklix-debug"`, `"daily-standup"`) so threads can track multiple parallel sessions in one surface.
+**Claude Code.** "Post the last error, the migration diff, and my current theory to relay thread tracklix-debug, surface code, session tag migration-apr18." Later, in a different session: "Pull the last ten messages from tracklix-debug."
+
+**Cowork.** Scheduled tasks post with `surface: cowork` and usually a `session_tag` matching the task name. Example inside a task prompt: "After you finish the morning action list, post a one-paragraph summary to relay thread daily-standup, surface cowork, session tag morning-action-list." Chat reads that thread later with zero copy-paste.
+
+**Claude.ai Chat.** "Post my last decision to thread siftid-scoring, surface chat. Calibration note: fewer than ten percent of ideas score above 8. Want to hold the line." Or on the read side: "Read daily-standup, show me everything Cowork posted this morning."
+
+### Thread naming
+
+Short, dash-separated, topic-scoped. `tracklix-debug`, not `tracklix_issues_april_2026`. One thread per topic, not one per day. Threads accumulate, conversations continue across weeks. A thread auto-creates the first time anything gets posted to it, so there is no ceremony around starting one.
+
+Good: `tracklix-debug`, `daily-standup`, `siftid-scoring`, `scratch`, `monster-poker-notes`.
+
+Bad: `april-18-tracklix-bugs`, `thread-1`, `general`.
+
+### Surface tagging is not optional
+
+Every message carries a `surface` of `chat`, `cowork`, `code`, or `other`. Do not skip it. Six months from now when you scroll a thread, knowing a message came from Cowork's morning task versus a live Chat argument changes how you weight it. Surface tagging is the cheapest metadata available and the one you will miss most if you drop it. Optional `session_tag` is free text and helps split multiple parallel sessions inside one surface.
+
+### Archive dead threads
+
+When a topic is done, run `relay_archive_thread`. Archived threads hide from the default `list_threads` output but stay queryable via `include_archived`. Think Slack channels, not Git branches. Archive preserves history, it does not delete. If `list_threads` starts feeling noisy, that is the signal to archive.
+
+### Topical separation is the whole point
+
+Do not dump everything into one thread. The relay's value is that Chat can pull `tracklix-debug` without wading through Monster Poker context. If you catch yourself debating whether a new message belongs in this thread or a different one, that is a signal to create a new thread. Cheap to make, cheap to archive.
+
+### The relay is not the log
+
+Canonical records still live in the Decision Log, Done/Didn't/Pushed, and status.md. The relay is the conversation layer between sessions, nothing more. Relay messages are transient-ish, they are handoffs in motion. Logs are permanent, they are the week-over-week record.
+
+If a relay thread ever surfaces a decision you will want to act on in two weeks, stop and log it to DDDP before moving on. Otherwise you will rediscover it by accident and regret it.
+
+### Never relay secrets
+
+Same rule as any chat. Service role keys, API tokens, database credentials, OAuth secrets, those go in Wrangler secrets, 1Password, or the Supabase dashboard. They never go in a relay message. The relay database is not a vault. Treat it like a shared Slack channel.
+
+### Three scenarios you will hit in the first week
+
+**Debugging in Code, want to continue in Chat.**
+
+You are in a Code session on Tracklix, stuck on a Prisma migration for twenty minutes. You want Chat's fresh eyes without retyping context.
+
+In Code: "Post the last error, the migration diff, and my current theory to relay thread tracklix-debug, surface code, session tag migration-apr18."
+
+Then in Chat: "Read tracklix-debug, last five messages, tell me what I am missing."
+
+Chat gets the full state, no copy-paste.
+
+**Cowork posts a morning action list, Chat reads it at 9 AM.**
+
+A Cowork scheduled task runs at 6 AM. It builds the action list and posts a summary to relay thread daily-standup, surface cowork.
+
+You open Chat three hours later: "What did Cowork put in daily-standup this morning?"
+
+Chat pulls it, summarizes, and you are working off a fresh picture in ten seconds. No Notion tab switching.
+
+**Random strategic thought at night, captured for morning review.**
+
+It is 11 PM, you are in Chat, you have a thought about SiftId pricing you do not want to lose and also do not want to act on now.
+
+"Post to thread scratch, surface chat, session tag late-night: SiftId Pro at four ninety nine may be signaling too cheap to the real market. Consider seven ninety nine test for two weeks, hold current pricing on existing users."
+
+Next morning: "Read scratch, last 24 hours."
+
+Your morning brain gets your night brain's note without having to remember it existed.
+
+### The one habit that makes it click
+
+After a meaningful relay post, also log it to status.md or the appropriate log. The relay is the in-the-moment handoff. Logs are the week-over-week record. Use both or lose visibility.
+
+Not every relay post needs a log entry. Debugging chatter does not. But any decision, shift in direction, or piece of state the relay carries that you will care about next week, yes, log it too. Two minutes of redundancy prevents two hours of confusion later.
+
+### First-week test drive
+
+Do not rewire your workflow yet. Start with two threads:
+
+- `daily-standup` for morning Cowork posts and your Chat morning review
+- `scratch` for anything that does not fit anywhere else
+
+Use those two for seven days. If they prove useful, add more threads for real work (tracklix-debug, siftid-ideas, monster-poker-notes). If they do not earn a spot in your daily rotation after a week, the relay is not for you. That is also useful information. Decide the future of the tool after the first week of real use, not before.
 
 ## Development
 
