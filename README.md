@@ -108,6 +108,28 @@ Add to `.mcp.json` in the project root, or to `~/.claude.json` for global access
 
 Restart Claude Code, run `/mcp`, and confirm `relay` appears with six tools.
 
+### Cursor
+
+Add to `.cursor/mcp.json` in the project root, or to `~/.cursor/mcp.json` for global access.
+
+```json
+{
+  "mcpServers": {
+    "relay": {
+      "type": "http",
+      "url": "<RELAY_URL>/mcp",
+      "headers": {
+        "Authorization": "Bearer <RELAY_API_KEY>"
+      }
+    }
+  }
+}
+```
+
+Restart Cursor, open the MCP settings, and confirm `relay` appears with six tools.
+
+Gotcha: the `relay` block must sit *inside* the `mcpServers` object. Cursor silently ignores any server defined at the top level of the file. If the tools do not show up, this is the first thing to check.
+
 ### Cowork scheduled tasks
 
 Add an `mcp_servers` block to any task prompt that needs relay access.
@@ -120,6 +142,33 @@ mcp_servers:
     headers:
       Authorization: "Bearer <RELAY_API_KEY>"
 ```
+
+### Claude Desktop
+
+Claude Desktop's MCP support expects stdio commands, not remote HTTP URLs. To connect to a remote relay, use the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge, which adapts a stdio-launched process to a remote HTTP MCP server.
+
+Open `claude_desktop_config.json` (on Windows: `%APPDATA%\Claude\claude_desktop_config.json`; on macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`) and add:
+
+```json
+{
+  "mcpServers": {
+    "relay": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "<RELAY_URL>/mcp",
+        "--header",
+        "Authorization: Bearer <RELAY_API_KEY>"
+      ]
+    }
+  }
+}
+```
+
+Fully quit Claude Desktop (not just close the window) and reopen. The relay should appear in the tools menu with six tools.
+
+Gotcha: Claude Desktop rewrites `claude_desktop_config.json` on some session lifecycle events and can silently wipe manual `mcpServers` additions. If your relay disappears between sessions, re-add the block and keep a backup copy somewhere outside the Claude Desktop config directory so you can paste it back. The Claude.ai custom connector path below avoids this entirely and is preferable if you can use it.
 
 ### Claude.ai custom connector
 
@@ -134,6 +183,22 @@ Claude.ai uses OAuth 2.1 with Dynamic Client Registration, which the relay suppo
 7. The browser redirects back to Claude.ai. The connector lists six tools.
 
 Access tokens last 90 days with automatic refresh, so you should rarely re-authorize. If auth ever fails, remove the connector and re-add.
+
+## Troubleshooting
+
+Common failure modes from real deploys, with the first thing to check for each.
+
+**Smoke test fails with 401 Unauthorized.** The `RELAY_API_KEY` in your local environment does not match the secret deployed to the Worker. Re-run `npx wrangler secret put RELAY_API_KEY`, then re-export the same value in the shell where you run the smoke test. Wrangler does not display secret values after they are set, so if in doubt, rotate to a fresh value on both sides.
+
+**Worker returns 5xx on any tool call.** Almost always the Supabase service-role key was not set, or was set to the anon key by mistake. Re-run `npx wrangler secret put SUPABASE_SERVICE_KEY` with the value from Supabase **Project Settings -> API -> service_role**. Also confirm `SUPABASE_URL` is the project URL (no trailing `/mcp`, no path) and `RELAY_USER_ID` is a valid UUID v4.
+
+**Custom domain returns 530.** Cloudflare 530 is a DNS resolution failure, usually the CNAME has not propagated yet. Wait a few minutes and retry. If it persists, confirm the hostname in `wrangler.toml` is on a Cloudflare zone you actually own and that `npx wrangler deploy` reported the route as attached.
+
+**Cursor does not see the relay tools.** The `relay` block is sitting at the top level of `.cursor/mcp.json` instead of inside the `mcpServers` object. Cursor silently ignores top-level entries. Move the block inside `mcpServers` and restart Cursor.
+
+**Claude Desktop does not see the relay tools.** Two likely causes. First, `mcp-remote` is missing or `npx` cannot fetch it on launch (Claude Desktop swallows stderr); run `npx -y mcp-remote --help` once in a terminal to prime the cache and surface any install errors. Second, Claude Desktop has overwritten `claude_desktop_config.json` and wiped your `mcpServers` entry; re-add it from your backup and fully quit and reopen the app.
+
+**OAuth flow on Claude.ai loops back to the authorize page.** The browser blocked third-party cookies on the Worker domain, or your `RELAY_API_KEY` was pasted with surrounding whitespace. Try a fresh browser profile, paste the key carefully, and watch the Worker logs (`npx wrangler tail`) for the actual error.
 
 ## Usage
 
