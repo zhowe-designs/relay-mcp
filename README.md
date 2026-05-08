@@ -26,6 +26,8 @@ Every message carries a `surface` field (`chat`, `cowork`, `code`, `other`) and 
 - **Two auth paths on the same server:**
   - **Static Bearer** for Claude Code and Cowork: `Authorization: Bearer <RELAY_API_KEY>`. Simplest possible. No browser flow.
   - **OAuth 2.1** with Dynamic Client Registration for Claude.ai custom connectors. The Worker exposes `/.well-known/oauth-authorization-server`, `/register`, `/authorize`, and `/token`. Access tokens are HS256 JWTs signed with `RELAY_API_KEY`. Stateless, no KV or Durable Objects required. Access tokens last 90 days, refresh tokens 365.
+
+  See [Security](#security) for the consolidated auth, rotation, and threat-model writeup.
 - **Single tenant** in v1. The Worker reads a hardcoded user UUID from the `RELAY_USER_ID` secret. Multi-user support is a one-file change in `src/oauth.ts` plus an RLS policy migration; the schema already carries `user_id` columns.
 
 ## Deploy your own
@@ -230,7 +232,47 @@ The relay is a conversation layer between sessions. It is not a log, not a decis
 
 ### Never relay secrets
 
-Same rule as any chat. API keys, service-role tokens, OAuth secrets, database credentials. Those go in Wrangler secrets or your password manager. They never go in a relay message. The relay database is not a vault.
+Same rule as any chat. API keys, service-role tokens, OAuth secrets, database credentials. Those go in Wrangler secrets or your password manager. They never go in a relay message. The relay database is not a vault. See [Security](#security) for the full list of what not to post.
+
+## Security
+
+This section consolidates the relay's auth model, key rotation procedure, content rules, and threat model.
+
+### Auth model
+
+**Static Bearer.** Claude Code and Cowork authenticate with `Authorization: Bearer <RELAY_API_KEY>`. The Worker compares the header to the `RELAY_API_KEY` secret on every request. There is no browser flow, no token exchange, no refresh. Whoever has the key has full access to every thread under the configured `RELAY_USER_ID`.
+
+**OAuth 2.1 with DCR.** Claude.ai custom connectors use OAuth 2.1 with Dynamic Client Registration against `/register`, `/authorize`, and `/token`. The user pastes their `RELAY_API_KEY` once into the Worker's authorize page; the Worker verifies it and issues an HS256 JWT signed with that same `RELAY_API_KEY`. Access tokens last 90 days, refresh tokens 365. No server-side session store, no KV, no Durable Objects.
+
+### Key rotation runbook
+
+Rotate `RELAY_API_KEY` with:
+
+```bash
+npx wrangler secret put RELAY_API_KEY
+```
+
+Consequences to plan for:
+
+- **All OAuth tokens are invalidated.** Tokens are JWTs signed with `RELAY_API_KEY`, so changing the secret breaks every existing signature. Every Claude.ai connector user must remove and re-add the connector and re-authorize with the new key.
+- **Static Bearer clients break until reconfigured.** Update `.mcp.json`, `.cursor/mcp.json`, `claude_desktop_config.json`, and any Cowork task `mcp_servers` blocks with the new key. Until each is updated, that client returns 401.
+
+Rotate when a key is suspected exposed, when a teammate with access leaves, or on a routine schedule if your threat model calls for one.
+
+### What not to post
+
+Threads are persisted in Supabase and are visible to anyone holding the `RELAY_API_KEY`. Treat the relay as a shared whiteboard, not a vault. Do not post:
+
+- API keys, service-role tokens, OAuth client secrets, refresh tokens.
+- Database passwords or connection strings with embedded credentials.
+- Customer PII, regulated data, or anything covered by an NDA.
+- Anything that would be a problem if the relay backend, the Supabase project, or any client config holding the API key were compromised.
+
+Secrets belong in Wrangler secrets or a password manager. The relay database is not a vault.
+
+### Threat model
+
+The relay is single-tenant in v1. It assumes the operator trusts every session that holds the `RELAY_API_KEY`, because any holder can read and write every thread under the configured `RELAY_USER_ID`. There is no per-session scoping, no audit trail beyond Worker logs, and no policy layer between the Worker and Supabase. Multi-user or multi-tenant deployments need additional auth layering (per-user keys, scoped tokens, RLS policies keyed off `user_id`) that is not provided here. The schema already carries `user_id` columns to make that extension straightforward, but you have to build it.
 
 ## Development
 
@@ -244,7 +286,7 @@ npx wrangler dev
 # Smoke test
 RELAY_URL=<your-url> RELAY_API_KEY=<your-key> npm run smoke:remote
 
-# Rotate a secret
+# Rotate a secret (see Security for consequences)
 npx wrangler secret put RELAY_API_KEY
 ```
 
