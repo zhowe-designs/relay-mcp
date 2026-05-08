@@ -1,6 +1,6 @@
 -- relay-mcp initial schema
--- Co-hosted in the SiftId Supabase project. All tables prefixed relay_ so the
--- namespace is obviously distinct from SiftId's own schema.
+-- All tables are prefixed relay_ so the namespace is distinct from anything
+-- else you may co-host in the same Supabase project.
 --
 -- v1 posture: RLS is enabled with zero policies. Only the service_role key
 -- (held by the Worker) can read or write. anon and authenticated are blocked.

@@ -1,55 +1,101 @@
 # relay-mcp
 
-Session Relay MCP server. Lets separate Claude sessions (Chat, Cowork, Code) post to and read from shared threads, so you stop copy-pasting context between surfaces.
+A self-hosted **session relay** for Claude. When you work across multiple Claude surfaces (Code, Cowork, Claude.ai connectors), each surface lives in its own context window. The relay gives them a shared message thread they can all post to and read from, so a Code session can hand state to a Chat session without copy-paste, and a scheduled Cowork task can leave a note your morning Chat picks up. It is a lightweight whiteboard, not a log or a memory store.
 
-**Live:** `https://relay-mcp.tracklix.co/mcp`
+## Tools
 
-## What it does
+The server exposes six MCP tools.
 
-A lightweight message relay with six tools:
-
-| Tool | What it does |
+| Tool | Description |
 |------|-------------|
-| `relay_list_threads` | List threads with last activity and message count |
-| `relay_create_thread` | Create a named thread |
-| `relay_post_message` | Post to a thread. Creates the thread if missing. |
+| `relay_list_threads` | List threads with last activity and message count. |
+| `relay_create_thread` | Create a named thread. |
+| `relay_post_message` | Post a message to a thread. Auto-creates the thread if missing. |
 | `relay_read_thread` | Read recent messages, newest first. Optional cursor update. |
-| `relay_check_new` | Return only messages since this reader last checked |
-| `relay_archive_thread` | Soft-archive a thread |
+| `relay_check_new` | Return only messages since this reader last checked. |
+| `relay_archive_thread` | Soft-archive a thread. History is preserved. |
 
-No AI, no summarization. Shared whiteboard that any Claude surface can read and write.
+Every message carries a `surface` field (`chat`, `cowork`, `code`, `other`) and an optional free-text `session_tag` so threads stay legible across many parallel sessions.
 
-## Hosting
+## Architecture
 
-- **Worker:** Cloudflare Worker at `relay-mcp.tracklix.co` (account `zhowe@uwalumni.com`). Co-located on the Tracklix Cloudflare zone because `pamplemoose.co` is on Vercel DNS.
-- **Database:** Postgres tables in the existing SiftId Supabase project (`yrhppxgzojagwwwsmhcf`). All tables prefixed `relay_`. RLS on, no policies, service-key-only.
-- **Auth:** two paths on the same server.
-  - **Static Bearer** for Code and Cowork: `Authorization: Bearer <RELAY_API_KEY>`. Simple, no browser flow.
-  - **OAuth 2.1** for Claude.ai's custom connector: the Worker exposes `/.well-known/oauth-authorization-server`, `/register`, `/authorize`, and `/token`. Access tokens are HS256 JWTs signed with `RELAY_API_KEY`. Stateless, no KV or DO. Access tokens last 90 days, refresh tokens 365.
-- **Tenant:** hardcoded to a single user UUID stored in `RELAY_USER_ID`. Multi-user swap is a one-file change in `src/auth.ts` plus a policy migration.
+- **Cloudflare Worker** at `src/index.ts`. Stateless. Speaks streamable HTTP MCP at `/mcp`.
+- **Supabase Postgres** for thread, message, and read-cursor storage. Three tables, all prefixed `relay_`. RLS enabled with zero policies; only the Worker's service-role key can read or write.
+- **Two auth paths on the same server:**
+  - **Static Bearer** for Claude Code and Cowork: `Authorization: Bearer <RELAY_API_KEY>`. Simplest possible. No browser flow.
+  - **OAuth 2.1** with Dynamic Client Registration for Claude.ai custom connectors. The Worker exposes `/.well-known/oauth-authorization-server`, `/register`, `/authorize`, and `/token`. Access tokens are HS256 JWTs signed with `RELAY_API_KEY`. Stateless, no KV or Durable Objects required. Access tokens last 90 days, refresh tokens 365.
+- **Single tenant** in v1. The Worker reads a hardcoded user UUID from the `RELAY_USER_ID` secret. Multi-user support is a one-file change in `src/oauth.ts` plus an RLS policy migration; the schema already carries `user_id` columns.
 
-## Where the API key lives
+## Deploy your own
 
-Save the `RELAY_API_KEY` value in 1Password under a new item named `relay-mcp`. Fields to include:
+Self-hosting takes about ten minutes. You will need a Cloudflare account (Workers free tier is fine), a Supabase project, and Node 20+ locally.
 
-- `api_key` — the bearer token
-- `url` — `https://relay-mcp.tracklix.co/mcp`
-- `user_id` — the tenant UUID set in the Worker
+### 1. Clone and install
 
-You can retrieve all four Worker secrets anytime via `npx wrangler secret list` from the project root (shows names only, never values). To rotate, run `npx wrangler secret put <NAME>` and update 1Password.
+```bash
+git clone https://github.com/zhowe-designs/relay-mcp.git
+cd relay-mcp
+npm install
+```
 
-## Config snippets
+### 2. Create a Supabase project and run the migration
 
-Replace `<RELAY_API_KEY>` with the value from 1Password.
+Create a new project at [supabase.com](https://supabase.com). In the SQL editor, paste and run `migrations/001_initial.sql`. This creates `relay_threads`, `relay_messages`, `relay_read_cursors`, sets up indexes, enables RLS with zero policies, and revokes anon and authenticated grants.
 
-### Claude Code (`.mcp.json` in the project, or `~/.claude.json` globally)
+From **Project Settings → API**, copy:
+
+- The **Project URL** (looks like `https://abcdef.supabase.co`).
+- The **service_role** key. Treat this like a database password.
+
+### 3. Pick a tenant UUID
+
+Generate one (`uuidgen`, `crypto.randomUUID()`, or any UUID v4 generator). This is the single user the v1 server is bound to. You can rotate it later, but everything posted under one UUID is invisible under another.
+
+### 4. Set Worker secrets
+
+```bash
+npx wrangler login
+npx wrangler secret put RELAY_API_KEY        # any random 32+ char string, your bearer
+npx wrangler secret put SUPABASE_URL          # https://<project-ref>.supabase.co
+npx wrangler secret put SUPABASE_SERVICE_KEY  # service_role key from step 2
+npx wrangler secret put RELAY_USER_ID         # UUID from step 3
+```
+
+### 5. Deploy
+
+```bash
+npx wrangler deploy
+```
+
+Wrangler prints the deployed URL, something like `https://relay-mcp.<your-subdomain>.workers.dev`. That URL plus `/mcp` is the MCP endpoint.
+
+### 6. Optional: custom domain
+
+Edit `wrangler.toml` and uncomment the `routes` block, swapping `relay-mcp.example.com` for a hostname on a Cloudflare zone you own. Re-run `npx wrangler deploy`. Wrangler creates the CNAME automatically.
+
+### 7. Smoke test
+
+```bash
+RELAY_URL=https://relay-mcp.<your-subdomain>.workers.dev RELAY_API_KEY=<your-key> \
+  node --experimental-strip-types scripts/smoke.ts
+```
+
+Forty assertions, including the OAuth flow. All green means you are live.
+
+## Configure your clients
+
+Replace `<RELAY_URL>` with your deployed URL and `<RELAY_API_KEY>` with the secret you set above.
+
+### Claude Code
+
+Add to `.mcp.json` in the project root, or to `~/.claude.json` for global access.
 
 ```json
 {
   "mcpServers": {
     "relay": {
       "type": "http",
-      "url": "https://relay-mcp.tracklix.co/mcp",
+      "url": "<RELAY_URL>/mcp",
       "headers": {
         "Authorization": "Bearer <RELAY_API_KEY>"
       }
@@ -58,189 +104,118 @@ Replace `<RELAY_API_KEY>` with the value from 1Password.
 }
 ```
 
-After editing, restart Claude Code. Verify with `/mcp` — you should see `relay` listed with six tools.
+Restart Claude Code, run `/mcp`, and confirm `relay` appears with six tools.
 
 ### Cowork scheduled tasks
 
-Add the relay to the task's `mcp_servers` block in the same shape Claude Code uses. Example snippet to drop into any Cowork task prompt that needs relay access:
+Add an `mcp_servers` block to any task prompt that needs relay access.
 
 ```yaml
 mcp_servers:
   relay:
     type: http
-    url: https://relay-mcp.tracklix.co/mcp
+    url: <RELAY_URL>/mcp
     headers:
       Authorization: "Bearer <RELAY_API_KEY>"
 ```
 
-Cowork tasks should include a `session_tag` on every post so you can tell cross-surface activity apart in `list_threads` output.
+### Claude.ai custom connector
 
-### Claude.ai (Chat) custom connector
+Claude.ai uses OAuth 2.1 with Dynamic Client Registration, which the relay supports.
 
-The relay speaks OAuth 2.1 with Dynamic Client Registration, so Claude.ai discovers and handles auth automatically.
+1. In Claude.ai, open **Settings → Connectors → Add custom connector**.
+2. Name: anything, e.g. `Relay`.
+3. Remote MCP server URL: `<RELAY_URL>/mcp`.
+4. Leave the Advanced OAuth fields blank. Claude.ai handles registration automatically.
+5. Click Add. A browser tab opens to your Worker's `/authorize` page.
+6. Paste your `RELAY_API_KEY` into the single input and click Authorize.
+7. The browser redirects back to Claude.ai. The connector lists six tools.
 
-1. In Claude.ai, open Settings → Connectors → **Add custom connector**.
-2. Name: `Relay`.
-3. Remote MCP server URL: `https://relay-mcp.tracklix.co/mcp`.
-4. Leave the **Advanced settings** OAuth fields blank. Claude.ai does Dynamic Client Registration on its own.
-5. Click Add. Claude.ai opens a browser tab to `relay-mcp.tracklix.co/authorize`.
-6. Paste your `RELAY_API_KEY` from 1Password into the single input, click Authorize.
-7. Browser redirects back to Claude.ai. Connector shows six tools.
+Access tokens last 90 days with automatic refresh, so you should rarely re-authorize. If auth ever fails, remove the connector and re-add.
 
-Access tokens last 90 days with automatic refresh via the 365-day refresh token, so you should rarely need to re-authorize. If the connector ever fails auth, remove it and re-add.
+## Usage
 
-## Usage Guide
+Once connected, you describe intent. The model picks the right tool. Some examples of sentences that work:
 
-The relay is the shared whiteboard between your Claude surfaces. It is not the log. How to use it day to day.
-
-### How to post and read from each surface
-
-These are the kinds of sentences you will actually say. You do not need to know tool names or argument shapes. Describe intent, the model picks the right relay tool.
-
-**Claude Code.** "Post the last error, the migration diff, and my current theory to relay thread tracklix-debug, surface code, session tag migration-apr18." Later, in a different session: "Pull the last ten messages from tracklix-debug."
-
-**Cowork.** Scheduled tasks post with `surface: cowork` and usually a `session_tag` matching the task name. Example inside a task prompt: "After you finish the morning action list, post a one-paragraph summary to relay thread daily-standup, surface cowork, session tag morning-action-list." Chat reads that thread later with zero copy-paste.
-
-**Claude.ai Chat.** "Post my last decision to thread siftid-scoring, surface chat. Calibration note: fewer than ten percent of ideas score above 8. Want to hold the line." Or on the read side: "Read daily-standup, show me everything Cowork posted this morning."
+- "Post the last error, the migration diff, and my theory to relay thread `migration-debug`, surface code."
+- "Read `daily-standup`, show me everything Cowork posted this morning."
+- "Pull the last ten messages from `migration-debug`."
 
 ### Thread naming
 
-Short, dash-separated, topic-scoped. `tracklix-debug`, not `tracklix_issues_april_2026`. One thread per topic, not one per day. Threads accumulate, conversations continue across weeks. A thread auto-creates the first time anything gets posted to it, so there is no ceremony around starting one.
+Short, dash-separated, topic-scoped. `migration-debug`, not `april_migration_issues_2026`. One thread per topic, not one per day. Threads accumulate; conversations continue across weeks. A thread auto-creates the first time anything posts to it, so there is no ceremony around starting one.
 
-Good: `tracklix-debug`, `daily-standup`, `siftid-scoring`, `scratch`, `monster-poker-notes`.
+Good: `migration-debug`, `daily-standup`, `pricing-notes`, `scratch`.
 
-Bad: `april-18-tracklix-bugs`, `thread-1`, `general`.
+Bad: `april-18-bugs`, `thread-1`, `general`.
 
 ### Surface tagging is not optional
 
-Every message carries a `surface` of `chat`, `cowork`, `code`, or `other`. Do not skip it. Six months from now when you scroll a thread, knowing a message came from Cowork's morning task versus a live Chat argument changes how you weight it. Surface tagging is the cheapest metadata available and the one you will miss most if you drop it. Optional `session_tag` is free text and helps split multiple parallel sessions inside one surface.
+Always set `surface` to `chat`, `cowork`, `code`, or `other`. Six months from now when you scroll a thread, knowing a message came from a scheduled Cowork task versus a live Chat conversation changes how you weight it. Use `session_tag` for free-text grouping inside a surface (e.g. one tag per debugging session).
 
 ### Archive dead threads
 
-When a topic is done, run `relay_archive_thread`. Archived threads hide from the default `list_threads` output but stay queryable via `include_archived`. Think Slack channels, not Git branches. Archive preserves history, it does not delete. If `list_threads` starts feeling noisy, that is the signal to archive.
+When a topic is done, call `relay_archive_thread`. Archived threads hide from the default `list_threads` output but stay queryable via `include_archived`. Think Slack channels, not Git branches. Archive preserves history; it does not delete.
 
-### Topical separation is the whole point
+### The boundary rule: transient layer, not canonical state
 
-Do not dump everything into one thread. The relay's value is that Chat can pull `tracklix-debug` without wading through Monster Poker context. If you catch yourself debating whether a new message belongs in this thread or a different one, that is a signal to create a new thread. Cheap to make, cheap to archive.
-
-### The relay is not the log
-
-Canonical records still live in the Decision Log, Done/Didn't/Pushed, and status.md. The relay is the conversation layer between sessions, nothing more. Relay messages are transient-ish, they are handoffs in motion. Logs are permanent, they are the week-over-week record.
-
-If a relay thread ever surfaces a decision you will want to act on in two weeks, stop and log it to DDDP before moving on. Otherwise you will rediscover it by accident and regret it.
+The relay is a conversation layer between sessions. It is not a log, not a decision record, and not a memory store. Anything you will care about next week belongs in your real system of record (decision log, task tracker, docs, code comments, etc.). The relay is what was said in the moment, not what was decided. If a relay post captures a real decision, write it down somewhere durable before moving on.
 
 ### Never relay secrets
 
-Same rule as any chat. Service role keys, API tokens, database credentials, OAuth secrets, those go in Wrangler secrets, 1Password, or the Supabase dashboard. They never go in a relay message. The relay database is not a vault. Treat it like a shared Slack channel.
-
-### Three scenarios you will hit in the first week
-
-**Debugging in Code, want to continue in Chat.**
-
-You are in a Code session on Tracklix, stuck on a Prisma migration for twenty minutes. You want Chat's fresh eyes without retyping context.
-
-In Code: "Post the last error, the migration diff, and my current theory to relay thread tracklix-debug, surface code, session tag migration-apr18."
-
-Then in Chat: "Read tracklix-debug, last five messages, tell me what I am missing."
-
-Chat gets the full state, no copy-paste.
-
-**Cowork posts a morning action list, Chat reads it at 9 AM.**
-
-A Cowork scheduled task runs at 6 AM. It builds the action list and posts a summary to relay thread daily-standup, surface cowork.
-
-You open Chat three hours later: "What did Cowork put in daily-standup this morning?"
-
-Chat pulls it, summarizes, and you are working off a fresh picture in ten seconds. No Notion tab switching.
-
-**Random strategic thought at night, captured for morning review.**
-
-It is 11 PM, you are in Chat, you have a thought about SiftId pricing you do not want to lose and also do not want to act on now.
-
-"Post to thread scratch, surface chat, session tag late-night: SiftId Pro at four ninety nine may be signaling too cheap to the real market. Consider seven ninety nine test for two weeks, hold current pricing on existing users."
-
-Next morning: "Read scratch, last 24 hours."
-
-Your morning brain gets your night brain's note without having to remember it existed.
-
-### The one habit that makes it click
-
-After a meaningful relay post, also log it to status.md or the appropriate log. The relay is the in-the-moment handoff. Logs are the week-over-week record. Use both or lose visibility.
-
-Not every relay post needs a log entry. Debugging chatter does not. But any decision, shift in direction, or piece of state the relay carries that you will care about next week, yes, log it too. Two minutes of redundancy prevents two hours of confusion later.
-
-### First-week test drive
-
-Do not rewire your workflow yet. Start with two threads:
-
-- `daily-standup` for morning Cowork posts and your Chat morning review
-- `scratch` for anything that does not fit anywhere else
-
-Use those two for seven days. If they prove useful, add more threads for real work (tracklix-debug, siftid-ideas, monster-poker-notes). If they do not earn a spot in your daily rotation after a week, the relay is not for you. That is also useful information. Decide the future of the tool after the first week of real use, not before.
+Same rule as any chat. API keys, service-role tokens, OAuth secrets, database credentials. Those go in Wrangler secrets or your password manager. They never go in a relay message. The relay database is not a vault.
 
 ## Development
 
-```
-# Install
-npm install
-
+```bash
 # Typecheck
 npm run typecheck
 
-# Deploy
-npx wrangler deploy
+# Local dev (requires .dev.vars, see .dev.vars.example)
+npx wrangler dev
 
-# Set or rotate a secret
+# Smoke test
+RELAY_URL=<your-url> RELAY_API_KEY=<your-key> npm run smoke:remote
+
+# Rotate a secret
 npx wrangler secret put RELAY_API_KEY
-
-# Smoke test against the deployed Worker
-RELAY_URL=https://relay-mcp.tracklix.co RELAY_API_KEY=... \
-  node --experimental-strip-types scripts/smoke.ts
 ```
-
-Local dev via `npx wrangler dev` requires a `.dev.vars` file with `RELAY_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `RELAY_USER_ID`. File is gitignored. See `.dev.vars.example` for shape.
 
 ## Schema
 
-Three tables in the SiftId Supabase project, all prefixed `relay_`. Migration at `migrations/001_initial.sql`.
+Three tables, all prefixed `relay_`. Migration at `migrations/001_initial.sql`.
 
-- `relay_threads` — one row per named thread per user.
-- `relay_messages` — one row per posted message, indexed on `(thread_id, created_at desc)`.
-- `relay_read_cursors` — one row per `(thread_id, reader_tag)`, tracks "last time this reader checked."
+- `relay_threads`. One row per named thread per user.
+- `relay_messages`. One row per posted message. Indexed on `(thread_id, created_at desc)`.
+- `relay_read_cursors`. One row per `(thread_id, reader_tag)`. Tracks "last time this reader checked."
 
-Service-role access only. RLS is enabled with zero policies, and the `anon` and `authenticated` Postgres roles have been revoked. Only the Worker can see or modify rows.
+Service-role access only. RLS is enabled with zero policies, and `anon` and `authenticated` are revoked. Only the Worker's service-role key can read or write.
 
-## v2 roadmap
-
-Not built. Worth considering:
-
-- Supabase Auth JWT validation (multi-user).
-- Websocket or SSE push so `check_new` stops being a poll.
-- File attachments via R2.
-- Full-text search over message content.
-- Optional TTL on archived threads.
-
-Decide after thirty days of real use.
-
-## Files
+## Layout
 
 ```
-products/relay-mcp/
-  src/
-    index.ts         Worker entry, MCP JSON-RPC protocol, routes
-    oauth.ts         OAuth 2.1 facade (metadata, register, authorize, token)
-    jwt.ts           HS256 JWT sign, verify, and PKCE check
-    db.ts            Supabase client factory
-    types.ts
-    tools/
-      threads.ts     list, create, archive, get_or_create helpers
-      messages.ts    post, read, check_new
-  migrations/
-    001_initial.sql  three tables + indexes + RLS lockdown
-  scripts/
-    smoke.ts         end-to-end smoke test (40 assertions, includes OAuth)
-  wrangler.toml
-  package.json
-  tsconfig.json
-  .dev.vars.example
+src/
+  index.ts         Worker entry, MCP JSON-RPC protocol, routes
+  oauth.ts         OAuth 2.1 facade (metadata, register, authorize, token)
+  jwt.ts           HS256 JWT sign, verify, PKCE check
+  db.ts            Supabase client factory
+  types.ts
+  tools/
+    threads.ts     list, create, archive, get_or_create
+    messages.ts    post, read, check_new
+migrations/
+  001_initial.sql  three tables + indexes + RLS lockdown
+scripts/
+  smoke.ts         end-to-end smoke test, includes OAuth
+wrangler.toml
+package.json
+server.json        MCP Registry metadata
 ```
+
+## Contributing
+
+This is not an actively maintained community project. PRs are welcome for bugfixes, documentation improvements, and obvious quality-of-life additions. Larger features or refactors will likely be declined to keep the surface area small. Open an issue first if you want to discuss something nontrivial.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

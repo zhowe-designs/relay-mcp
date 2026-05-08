@@ -1,15 +1,31 @@
 {
   "name": "relay-mcp",
   "version": "0.1.0",
-  "private": true,
   "description": "Session Relay MCP server. Shared threads across Claude Chat, Cowork, and Code.",
+  "license": "MIT",
+  "author": "Pamplemoose Games LLC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhowe-designs/relay-mcp.git"
+  },
+  "homepage": "https://github.com/zhowe-designs/relay-mcp",
+  "bugs": {
+    "url": "https://github.com/zhowe-designs/relay-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "cloudflare-workers",
+    "supabase"
+  ],
   "main": "src/index.ts",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "smoke:local": "node --experimental-strip-types scripts/smoke.ts",
-    "smoke:remote": "RELAY_URL=https://relay-mcp.pamplemoose.co node --experimental-strip-types scripts/smoke.ts"
+    "smoke:remote": "node --experimental-strip-types scripts/smoke.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
