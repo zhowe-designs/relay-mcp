@@ -1,5 +1,7 @@
 # relay-mcp
 
+> This repo is the open-source reference implementation. The author runs a private deployed instance at a different URL, but you should deploy your own instance for production use.
+
 A self-hosted **session relay** for Claude. When you work across multiple Claude surfaces (Code, Cowork, Claude.ai connectors), each surface lives in its own context window. The relay gives them a shared message thread they can all post to and read from, so a Code session can hand state to a Chat session without copy-paste, and a scheduled Cowork task can leave a note your morning Chat picks up. It is a lightweight whiteboard, not a log or a memory store.
 
 ## Tools
