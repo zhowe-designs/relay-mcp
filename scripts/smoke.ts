@@ -6,7 +6,12 @@
 
 const RELAY_URL = process.env.RELAY_URL ?? "http://127.0.0.1:8787";
 const RELAY_API_KEY = process.env.RELAY_API_KEY ?? "";
-const ENDPOINT = RELAY_URL.replace(/\/$/, "") + "/mcp";
+const BASE = RELAY_URL.replace(/\/$/, "");
+const ENDPOINT = BASE + "/mcp";
+// How long to wait for a freshly deployed Worker to start serving before we
+// give up. A just-deployed *.workers.dev route can take tens of seconds to
+// propagate. Overridable so a quick local run does not wait the full window.
+const READY_TIMEOUT_MS = Number(process.env.SMOKE_READY_TIMEOUT_MS ?? "90000");
 
 if (!RELAY_API_KEY) {
   console.error("RELAY_API_KEY not set. Export it before running smoke test.");
@@ -25,13 +30,25 @@ async function rpc(method: string, params?: Record<string, unknown>, opts?: { no
     body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params })
   });
   const text = await res.text();
-  let body: unknown;
-  try {
-    body = text ? JSON.parse(text) : null;
-  } catch {
-    body = text;
+  let body: { result?: unknown; error?: unknown } = {};
+  let parsed = false;
+  if (text) {
+    try {
+      body = JSON.parse(text) as { result?: unknown; error?: unknown };
+      parsed = true;
+    } catch {
+      parsed = false;
+    }
   }
-  return { status: res.status, body: body as { result?: unknown; error?: unknown } };
+  // Fail loud rather than feeding null/garbage to the assertions. A non-2xx
+  // or non-JSON response means the request never reached the MCP handler
+  // (route still propagating, wrong URL, or a 5xx). The missing-auth check
+  // deliberately expects a 401, so do not warn on that one.
+  const expectsNon200 = opts?.noAuth === true;
+  if ((!res.ok && !expectsNon200) || (text && !parsed)) {
+    console.log(`  warn ${method}: HTTP ${res.status}${parsed ? "" : " non-JSON"} ${text.slice(0, 160)}`);
+  }
+  return { status: res.status, body };
 }
 
 function assert(label: string, cond: unknown) {
@@ -54,11 +71,63 @@ function toolContent(body: { result?: unknown }): unknown {
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Poll the unauthenticated /health endpoint until the Worker actually serves
+// traffic. This is the real fix for the "fresh install shows a red smoke test
+// even though the relay is healthy" report: the installer runs this script the
+// instant `wrangler deploy` returns, but a brand-new *.workers.dev route can
+// briefly return non-JSON Cloudflare error pages. /health needs no auth and
+// does not touch Supabase, so it isolates "is the route live yet" from
+// everything else (auth, schema, tools).
+async function waitForReady(): Promise<void> {
+  const start = Date.now();
+  let delay = 1000;
+  let last = "no response yet";
+  while (Date.now() - start < READY_TIMEOUT_MS) {
+    try {
+      const res = await fetch(BASE + "/health");
+      const text = await res.text();
+      if (res.status === 200) {
+        try {
+          const ready = JSON.parse(text) as { ok?: boolean };
+          if (ready?.ok) {
+            console.log(`worker ready after ${Math.round((Date.now() - start) / 1000)}s`);
+            return;
+          }
+        } catch {
+          // 200 but not JSON yet; the edge is still warming. Keep polling.
+        }
+      }
+      last = `HTTP ${res.status}: ${text.slice(0, 120)}`;
+    } catch (err) {
+      last = err instanceof Error ? err.message : String(err);
+    }
+    await sleep(delay);
+    delay = Math.min(Math.round(delay * 1.5), 5000);
+  }
+  throw new Error(`Worker did not become ready within ${Math.round(READY_TIMEOUT_MS / 1000)}s. Last probe: ${last}.`);
+}
+
 async function main() {
   const threadName = `smoke-${Date.now()}`;
   const readerTag = `smoke-reader-${Date.now()}`;
 
   console.log(`smoke test against ${ENDPOINT}`);
+
+  // Wait for the just-deployed Worker to actually serve before asserting.
+  try {
+    await waitForReady();
+  } catch (err) {
+    console.error("");
+    console.error(`Smoke test could not reach the Worker: ${err instanceof Error ? err.message : String(err)}`);
+    console.error("This is almost always the workers.dev route still propagating after a fresh deploy.");
+    console.error("Wait a minute, then re-run ./smoke-test.sh (or smoke-test.ps1 on Windows).");
+    console.error("It is NOT a Supabase migration problem.");
+    process.exit(1);
+  }
 
   // 1. initialize
   {
@@ -127,11 +196,12 @@ async function main() {
       name: "relay_read_thread",
       arguments: { thread_name: threadName, reader_tag: readerTag }
     });
-    const data = toolContent(body) as Array<{ content: string; surface: string }>;
+    const data = toolContent(body) as Array<{ content: string; surface: string }> | null;
+    const messages = Array.isArray(data) ? data : [];
     assert("read_thread returns array", Array.isArray(data));
-    assert("read_thread has one message", data.length === 1);
-    assert("message content matches", data[0]?.content === "hello from smoke test");
-    assert("message surface is code", data[0]?.surface === "code");
+    assert("read_thread has one message", messages.length === 1);
+    assert("message content matches", messages[0]?.content === "hello from smoke test");
+    assert("message surface is code", messages[0]?.surface === "code");
   }
 
   // 7. check_new right after read advances cursor to zero
@@ -168,7 +238,10 @@ async function main() {
       name: "relay_list_threads",
       arguments: {}
     });
-    const threads = toolContent(body) as Array<{ name: string; message_count: number }>;
+    const threadsRaw = toolContent(body);
+    const threads = Array.isArray(threadsRaw)
+      ? (threadsRaw as Array<{ name: string; message_count: number }>)
+      : [];
     const found = threads.find((t) => t.name === threadName);
     assert("list_threads finds our thread", !!found);
     assert("list_threads reports 2 messages", found?.message_count === 2);
@@ -190,7 +263,10 @@ async function main() {
       name: "relay_list_threads",
       arguments: {}
     });
-    const threads = toolContent(body) as Array<{ name: string }>;
+    const threadsRaw = toolContent(body);
+    const threads = Array.isArray(threadsRaw)
+      ? (threadsRaw as Array<{ name: string }>)
+      : [];
     const found = threads.find((t) => t.name === threadName);
     assert("archived thread hidden from default list", !found);
   }
